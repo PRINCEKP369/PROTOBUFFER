@@ -1,5 +1,270 @@
 # PROTOBUFFER
 
+Let me walk you through a complete example of UDP client-server communication in C++ where the server sends employee information serialized as protobuf.
+
+## Setup
+
+First, install the required dependencies:
+```bash
+# Ubuntu/Debian
+sudo apt install protobuf-compiler libprotobuf-dev
+```
+
+## Step 1: Define the Protobuf Schema
+
+**`employee.proto`**
+```proto
+syntax = "proto3";
+
+message Employee {
+  int32 id = 1;
+  string name = 2;
+  string department = 3;
+  float salary = 4;
+}
+
+message EmployeeList {
+  repeated Employee employees = 1;
+}
+```
+
+Generate C++ code from it:
+```bash
+protoc --cpp_out=. employee.proto
+# Generates: employee.pb.h and employee.pb.cc
+```
+
+---
+
+## Step 2: The Server
+
+**`server.cpp`**
+```cpp
+#include <iostream>
+#include <string>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include "employee.pb.h"
+
+#define PORT 9090
+#define MAX_BUFFER 65507   // max UDP payload
+
+EmployeeList buildEmployeeList() {
+    EmployeeList list;
+
+    auto* e1 = list.add_employees();
+    e1->set_id(1);
+    e1->set_name("Alice Johnson");
+    e1->set_department("Engineering");
+    e1->set_salary(95000.0f);
+
+    auto* e2 = list.add_employees();
+    e2->set_id(2);
+    e2->set_name("Bob Smith");
+    e2->set_department("Marketing");
+    e2->set_salary(72000.0f);
+
+    auto* e3 = list.add_employees();
+    e3->set_id(3);
+    e3->set_name("Carol White");
+    e3->set_department("HR");
+    e3->set_salary(68000.0f);
+
+    return list;
+}
+
+int main() {
+    // 1. Create UDP socket
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        std::cerr << "Socket creation failed\n";
+        return 1;
+    }
+
+    // 2. Bind to port
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+    serverAddr.sin_port = htons(PORT);
+
+    if (bind(sockfd, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) {
+        std::cerr << "Bind failed\n";
+        return 1;
+    }
+
+    std::cout << "Server listening on port " << PORT << "...\n";
+
+    while (true) {
+        char buffer[MAX_BUFFER];
+        sockaddr_in clientAddr{};
+        socklen_t clientLen = sizeof(clientAddr);
+
+        // 3. Wait for any request from client
+        int bytesReceived = recvfrom(sockfd, buffer, MAX_BUFFER, 0,
+                                     (sockaddr*)&clientAddr, &clientLen);
+        if (bytesReceived < 0) {
+            std::cerr << "recvfrom failed\n";
+            continue;
+        }
+
+        std::cout << "Request received from client. Sending employee data...\n";
+
+        // 4. Build and serialize protobuf
+        EmployeeList empList = buildEmployeeList();
+        std::string serialized;
+        if (!empList.SerializeToString(&serialized)) {
+            std::cerr << "Serialization failed\n";
+            continue;
+        }
+
+        // 5. Send serialized protobuf back to client
+        sendto(sockfd, serialized.c_str(), serialized.size(), 0,
+               (sockaddr*)&clientAddr, clientLen);
+
+        std::cout << "Sent " << serialized.size() << " bytes\n";
+    }
+
+    close(sockfd);
+    return 0;
+}
+```
+
+---
+
+## Step 3: The Client
+
+**`client.cpp`**
+```cpp
+#include <iostream>
+#include <string>
+#include <arpa/inet.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include "employee.pb.h"
+
+#define SERVER_IP "127.0.0.1"
+#define PORT 9090
+#define MAX_BUFFER 65507
+
+int main() {
+    // 1. Create UDP socket
+    int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sockfd < 0) {
+        std::cerr << "Socket creation failed\n";
+        return 1;
+    }
+
+    // 2. Set server address
+    sockaddr_in serverAddr{};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(PORT);
+    inet_pton(AF_INET, SERVER_IP, &serverAddr.sin_addr);
+
+    // 3. Send a request trigger to the server
+    const char* request = "GET_EMPLOYEES";
+    sendto(sockfd, request, strlen(request), 0,
+           (sockaddr*)&serverAddr, sizeof(serverAddr));
+
+    std::cout << "Request sent to server. Waiting for response...\n";
+
+    // 4. Receive serialized protobuf response
+    char buffer[MAX_BUFFER];
+    sockaddr_in fromAddr{};
+    socklen_t fromLen = sizeof(fromAddr);
+
+    int bytesReceived = recvfrom(sockfd, buffer, MAX_BUFFER, 0,
+                                 (sockaddr*)&fromAddr, &fromLen);
+    if (bytesReceived < 0) {
+        std::cerr << "recvfrom failed\n";
+        return 1;
+    }
+
+    std::cout << "Received " << bytesReceived << " bytes from server\n\n";
+
+    // 5. Deserialize protobuf
+    EmployeeList empList;
+    if (!empList.ParseFromArray(buffer, bytesReceived)) {
+        std::cerr << "Failed to parse protobuf\n";
+        return 1;
+    }
+
+    // 6. Print employees
+    std::cout << "===== Employee List =====\n";
+    for (const auto& emp : empList.employees()) {
+        std::cout << "ID         : " << emp.id() << "\n";
+        std::cout << "Name       : " << emp.name() << "\n";
+        std::cout << "Department : " << emp.department() << "\n";
+        std::cout << "Salary     : $" << emp.salary() << "\n";
+        std::cout << "-------------------------\n";
+    }
+
+    close(sockfd);
+    return 0;
+}
+```
+
+---
+
+## Step 4: Compile & Run
+
+```bash
+# Compile
+g++ server.cpp employee.pb.cc -o server `pkg-config --cflags --libs protobuf`
+g++ client.cpp employee.pb.cc -o client `pkg-config --cflags --libs protobuf`
+
+# Terminal 1 - Start server
+./server
+
+# Terminal 2 - Run client
+./client
+```
+
+---
+
+## Expected Output (Client)
+
+```
+Request sent to server. Waiting for response...
+Received 97 bytes from server
+
+===== Employee List =====
+ID         : 1
+Name       : Alice Johnson
+Department : Engineering
+Salary     : $95000
+-------------------------
+ID         : 2
+Name       : Bob Smith
+Department : Marketing
+Salary     : $72000
+-------------------------
+ID         : 3
+Name       : Carol White
+Department : HR
+Salary     : $68000
+-------------------------
+```
+
+---
+
+## How it all fits together
+
+```
+CLIENT                           SERVER
+  |                                 |
+  |---"GET_EMPLOYEES" (UDP)-------->|
+  |                                 |  builds EmployeeList
+  |                                 |  serializes to protobuf bytes
+  |<--[binary protobuf payload]-----|
+  |                                 |
+  | parses bytes → EmployeeList     |
+  | prints employees                |
+```
+
+The key insight is that `SerializeToString()` on the server and `ParseFromArray()` on the client are the only two lines that make this protobuf — everything else is standard UDP socket code.
+
+
 Great question! Let's compare protobuf directly against plain C++ structs.
 
 ## If you used a raw C++ struct instead...
